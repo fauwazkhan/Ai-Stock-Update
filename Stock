@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Inventory Manager</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: Global variables are provided by the canvas environment. Do not change.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Log levels for Firestore debugging
+        setLogLevel('debug');
+
+        let db, auth;
+        let userId = null;
+        let inventoryCollectionRef = null;
+        let inventory = [];
+
+        // UI Elements
+        const loadingScreen = document.getElementById('loading-screen');
+        const mainContent = document.getElementById('main-content');
+        const userIdDisplay = document.getElementById('user-id-display');
+        const productForm = document.getElementById('add-product-form');
+        const updateStockForm = document.getElementById('update-stock-form');
+        const alertsContainer = document.getElementById('alerts-container');
+        const inventoryTableBody = document.getElementById('inventory-table-body');
+
+        // This is a simplified "AI" model for predicting reorder dates.
+        // It's a predictive calculation based on average sales.
+        const NOTIFICATION_THRESHOLD_DAYS = 2; // Notify 2 days before estimated stock-out.
+
+        function predictStockOutDate(product) {
+            if (product.dailySalesAvg > 0) {
+                const daysOfStockLeft = product.stock / product.dailySalesAvg;
+                const stockOutDate = new Date();
+                stockOutDate.setDate(stockOutDate.getDate() + daysOfStockLeft);
+                return stockOutDate;
+            }
+            return null;
+        }
+
+        function checkForLowStockAndRender(currentInventory) {
+            alertsContainer.innerHTML = ''; // Clear previous alerts
+            const today = new Date();
+
+            const lowStockProducts = currentInventory.filter(product => {
+                const stockOutDate = predictStockOutDate(product);
+                if (stockOutDate) {
+                    const timeUntilStockOut = stockOutDate.getTime() - today.getTime();
+                    const daysUntilStockOut = timeUntilStockOut / (1000 * 3600 * 24);
+                    return daysUntilStockOut <= NOTIFICATION_THRESHOLD_DAYS;
+                }
+                return false;
+            });
+
+            if (lowStockProducts.length > 0) {
+                lowStockProducts.forEach(product => {
+                    const alertDiv = document.createElement('div');
+                    alertDiv.className = 'bg-red-500 text-white p-3 rounded-lg shadow-md mb-2 flex justify-between items-center';
+                    const stockOutDate = predictStockOutDate(product).toLocaleDateString();
+                    alertDiv.innerHTML = `
+                        <div>
+                            <span class="font-bold">ALERT: Low Stock!</span>
+                            <br>
+                            ${product.name} is estimated to run out by ${stockOutDate}. Please reorder now!
+                        </div>
+                    `;
+                    alertsContainer.appendChild(alertDiv);
+                });
+            } else {
+                const noAlertsDiv = document.createElement('div');
+                noAlertsDiv.className = 'bg-green-500 text-white p-3 rounded-lg shadow-md';
+                noAlertsDiv.textContent = 'All products are at a healthy stock level.';
+                alertsContainer.appendChild(noAlertsDiv);
+            }
+        }
+
+        function renderInventoryTable(inventoryData) {
+            inventoryTableBody.innerHTML = '';
+            inventoryData.sort((a, b) => a.name.localeCompare(b.name));
+            
+            inventoryData.forEach(product => {
+                const stockOutDate = predictStockOutDate(product);
+                const stockOutDateFormatted = stockOutDate ? stockOutDate.toLocaleDateString() : 'N/A';
+                
+                const row = document.createElement('tr');
+                row.className = 'border-b last:border-0 hover:bg-gray-100';
+                row.innerHTML = `
+                    <td class="p-4">${product.name}</td>
+                    <td class="p-4">${product.barcode}</td>
+                    <td class="p-4">${product.stock}</td>
+                    <td class="p-4">${product.dailySalesAvg}</td>
+                    <td class="p-4">${stockOutDateFormatted}</td>
+                `;
+                inventoryTableBody.appendChild(row);
+            });
+        }
+
+        async function initFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        userIdDisplay.textContent = `User ID: ${userId}`;
+                        inventoryCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/inventory`);
+                        
+                        // Set up real-time listener for inventory data
+                        onSnapshot(inventoryCollectionRef, (snapshot) => {
+                            inventory = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                            renderInventoryTable(inventory);
+                            checkForLowStockAndRender(inventory);
+                            loadingScreen.classList.add('hidden');
+                            mainContent.classList.remove('hidden');
+                        }, (error) => {
+                            console.error("Error listening to Firestore:", error);
+                        });
+
+                    } else {
+                        // Not authenticated, try to sign in with custom token or anonymously
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                loadingScreen.innerHTML = `<div class="text-red-500">Failed to initialize. Check console for details.</div>`;
+            }
+        }
+
+        productForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const productName = document.getElementById('product-name').value;
+            const productBarcode = document.getElementById('product-barcode').value;
+            const productStock = parseInt(document.getElementById('product-stock').value, 10);
+            const dailySalesAvg = parseInt(document.getElementById('daily-sales-avg').value, 10);
+
+            if (!productName || !productBarcode || isNaN(productStock) || isNaN(dailySalesAvg)) {
+                console.error("Please fill all fields with valid data.");
+                return;
+            }
+
+            try {
+                await addDoc(inventoryCollectionRef, {
+                    name: productName,
+                    barcode: productBarcode,
+                    stock: productStock,
+                    dailySalesAvg: dailySalesAvg,
+                    createdAt: new Date().toISOString()
+                });
+                productForm.reset();
+            } catch (e) {
+                console.error("Error adding document: ", e);
+            }
+        });
+
+        updateStockForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const barcodeToScan = document.getElementById('scan-barcode').value;
+            const stockChange = parseInt(document.getElementById('stock-change').value, 10);
+
+            if (!barcodeToScan || isNaN(stockChange)) {
+                console.error("Please enter a valid barcode and stock change.");
+                return;
+            }
+
+            const productToUpdate = inventory.find(p => p.barcode === barcodeToScan);
+
+            if (productToUpdate) {
+                const newStock = productToUpdate.stock + stockChange;
+                const productRef = doc(db, `artifacts/${appId}/users/${userId}/inventory`, productToUpdate.id);
+                try {
+                    await updateDoc(productRef, {
+                        stock: newStock
+                    });
+                    console.log(`Updated stock for ${productToUpdate.name}. New stock: ${newStock}`);
+                    updateStockForm.reset();
+                } catch (e) {
+                    console.error("Error updating document:", e);
+                }
+            } else {
+                console.error("Product with this barcode not found.");
+            }
+        });
+        
+        window.onload = initFirebase;
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <!-- Loading Screen -->
+    <div id="loading-screen" class="fixed inset-0 flex items-center justify-center bg-gray-100 z-50">
+        <div class="flex flex-col items-center p-6 bg-white rounded-lg shadow-xl">
+            <svg class="animate-spin h-10 w-10 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <p class="mt-4 text-gray-700 font-semibold">Loading App...</p>
+        </div>
+    </div>
+
+    <!-- Main Application Content -->
+    <div id="main-content" class="w-full max-w-6xl p-6 bg-white rounded-xl shadow-2xl space-y-8 hidden">
+        <div class="flex items-center justify-between flex-wrap gap-4">
+            <h1 class="text-3xl font-bold text-gray-800">AI Inventory Manager</h1>
+            <p id="user-id-display" class="text-gray-500 text-sm italic rounded-full px-3 py-1 bg-gray-200">User ID: Loading...</p>
+        </div>
+
+        <!-- Alerts Section -->
+        <section>
+            <h2 class="text-xl font-semibold text-gray-700 mb-4">Low Stock Alerts</h2>
+            <div id="alerts-container" class="space-y-2">
+                <!-- Alerts will be injected here -->
+            </div>
+        </section>
+
+        <!-- Forms Section -->
+        <section class="grid md:grid-cols-2 gap-8">
+            <div class="p-6 bg-gray-50 rounded-lg shadow-inner">
+                <h3 class="text-lg font-semibold text-gray-700 mb-4">Add New Product</h3>
+                <form id="add-product-form" class="space-y-4">
+                    <input type="text" id="product-name" placeholder="Product Name" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200">
+                    <input type="text" id="product-barcode" placeholder="Barcode (e.g., 1234567890)" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200">
+                    <input type="number" id="product-stock" placeholder="Initial Stock" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200">
+                    <input type="number" id="daily-sales-avg" placeholder="Avg. Daily Sales" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200">
+                    <button type="submit" class="w-full p-3 bg-blue-600 text-white font-semibold rounded-lg shadow-lg hover:bg-blue-700 transition duration-200">Add Product</button>
+                </form>
+            </div>
+
+            <div class="p-6 bg-gray-50 rounded-lg shadow-inner">
+                <h3 class="text-lg font-semibold text-gray-700 mb-4">Update Stock by Barcode</h3>
+                <form id="update-stock-form" class="space-y-4">
+                    <input type="text" id="scan-barcode" placeholder="Scan/Enter Barcode" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200">
+                    <input type="number" id="stock-change" placeholder="Change in Stock (e.g., -1 for sale, +10 for restock)" required class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-200">
+                    <button type="submit" class="w-full p-3 bg-purple-600 text-white font-semibold rounded-lg shadow-lg hover:bg-purple-700 transition duration-200">Update Stock</button>
+                </form>
+            </div>
+        </section>
+
+        <!-- Inventory Table Section -->
+        <section>
+            <h2 class="text-xl font-semibold text-gray-700 mb-4">Current Inventory</h2>
+            <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-100">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Product</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Barcode</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stock</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Avg. Daily Sales</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Est. Stock-out Date</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inventory-table-body" class="bg-white divide-y divide-gray-200">
+                        <!-- Inventory data will be rendered here -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </div>
+
+</body>
+</html>
